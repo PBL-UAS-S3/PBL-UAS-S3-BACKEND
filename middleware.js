@@ -15,4 +15,13 @@ function verifyToken(req, res, next) {
   }
 }
 
-module.exports = verifyToken;
+function verifyManager(req, res, next) {
+  verifyToken(req, res, () => {
+    if (req.user.role !== 'manager') {
+      return res.status(403).json({ error: 'Hanya manager yang boleh mengakses fitur ini' });
+    }
+    next();
+  });
+}
+
+module.exports = { verifyToken, verifyManager };
