@@ -11,7 +11,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const JWT_SECRET = 'rahasia_warehouse_ac03'; // nanti pindah ke .env juga
+const JWT_SECRET = 'rahasia_warehouse_ac03';
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // ==== AUTH ====
@@ -42,12 +42,10 @@ app.post('/auth/login', async (req, res) => {
 });
 
 // ==== PRODUCTS (CRUD) ====
-// Lihat produk: siapa saja boleh (manager & staf).
-// Tambah/edit/hapus produk: cuma manager.
 
 app.get('/products', async (req, res) => {
   try {
-    const [rows] = await db.query('select id, sku, nama, kategori, satuan, stok_saat_ini, stok_minimum from products');
+    const [rows] = await db.query('select id, sku, nama, kategori, satuan, harga, stok_saat_ini, stok_minimum from products');
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -55,12 +53,12 @@ app.get('/products', async (req, res) => {
 });
 
 app.post('/products', verifyManager, async (req, res) => {
-  const { sku, nama, kategori, satuan, stok_saat_ini, stok_minimum } = req.body;
+  const { sku, nama, kategori, satuan, harga, stok_saat_ini, stok_minimum } = req.body;
 
   try {
     await db.query(
-      'insert into products (sku, nama, kategori, satuan, stok_saat_ini, stok_minimum) values (?, ?, ?, ?, ?, ?)',
-      [sku, nama, kategori, satuan, stok_saat_ini, stok_minimum]
+      'insert into products (sku, nama, kategori, satuan, harga, stok_saat_ini, stok_minimum) values (?, ?, ?, ?, ?, ?, ?)',
+      [sku, nama, kategori, satuan, harga || 0, stok_saat_ini, stok_minimum]
     );
     res.status(201).json({ message: 'Produk berhasil ditambahkan' });
   } catch (err) {
@@ -69,11 +67,11 @@ app.post('/products', verifyManager, async (req, res) => {
 });
 
 app.put('/products/:id', verifyManager, async (req, res) => {
-  const { nama, kategori, satuan, stok_saat_ini, stok_minimum } = req.body;
+  const { nama, kategori, satuan, harga, stok_saat_ini, stok_minimum } = req.body;
 
   await db.query(
-    'update products set nama = ?, kategori = ?, satuan = ?, stok_saat_ini = ?, stok_minimum = ? where id = ?',
-    [nama, kategori, satuan, stok_saat_ini, stok_minimum, req.params.id]
+    'update products set nama = ?, kategori = ?, satuan = ?, harga = ?, stok_saat_ini = ?, stok_minimum = ? where id = ?',
+    [nama, kategori, satuan, harga || 0, stok_saat_ini, stok_minimum, req.params.id]
   );
   res.json({ message: 'Produk berhasil diupdate' });
 });
@@ -84,7 +82,6 @@ app.delete('/products/:id', verifyManager, async (req, res) => {
 });
 
 // ==== TRANSACTIONS ====
-// Catat transaksi: manager ATAU staf boleh (ini memang tugas utama staf di mobile).
 
 app.post('/transactions', verifyToken, async (req, res) => {
   const { sku, tipe, jumlah, catatan } = req.body;
@@ -123,7 +120,6 @@ app.get('/transactions/recent', async (req, res) => {
 });
 
 // ==== AI INSIGHTS ====
-// Generate analisis & lihat hasilnya: cuma manager (ini fitur dashboard manager).
 
 function tunggu(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -136,7 +132,7 @@ function ambilRetryDelay(err) {
     const cocok = err.message.match(/"retryDelay":"(\d+)s"/);
     if (cocok) return parseInt(cocok[1], 10) * 1000;
   } catch (e) {
-    // abaikan, pakai default di bawah
+    // abaikan
   }
   return null;
 }
@@ -231,7 +227,6 @@ app.get('/ai-insights', verifyManager, async (req, res) => {
 });
 
 // ==== PURCHASE ORDERS ====
-// Semua operasi PO: cuma manager.
 
 app.post('/purchase-orders', verifyManager, async (req, res) => {
   const { sku, jumlah, catatan } = req.body;
