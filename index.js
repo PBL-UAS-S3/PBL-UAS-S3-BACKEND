@@ -134,6 +134,94 @@ app.post('/auth/login', async (req, res) => {
   res.json({ token, nama: user.nama, role: user.role });
 });
 
+// Reset password (khusus akun manager, dipakai halaman /lupa-password di web)
+app.post('/auth/reset-password', async (req, res) => {
+  const { email, password_baru } = req.body;
+
+  if (!email || !password_baru) {
+    return res.status(400).json({ error: 'Email dan password baru wajib diisi' });
+  }
+  if (password_baru.length < 6) {
+    return res.status(400).json({ error: 'Password minimal 6 karakter' });
+  }
+
+  try {
+    const [rows] = await db.query('select id, role from users where email = ?', [email]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Email tidak ditemukan' });
+    }
+    if (rows[0].role !== 'manager') {
+      return res.status(403).json({ error: 'Reset password lewat web hanya untuk akun Manager' });
+    }
+
+    const passwordHash = await bcrypt.hash(password_baru, 10);
+    await db.query('update users set password = ? where id = ?', [passwordHash, rows[0].id]);
+
+    res.json({ message: 'Password berhasil diubah' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ambil data profil user yang sedang login
+app.get('/auth/profil', verifyToken, async (req, res) => {
+  try {
+    const [rows] = await db.query('select id, nama, email, telepon, role from users where id = ?', [req.user.id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Akun tidak ditemukan' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update nama & telepon (email dikunci, tidak bisa diubah dari sini)
+app.put('/auth/profil', verifyToken, async (req, res) => {
+  const { nama, telepon } = req.body;
+
+  if (!nama) {
+    return res.status(400).json({ error: 'Nama wajib diisi' });
+  }
+
+  try {
+    await db.query('update users set nama = ?, telepon = ? where id = ?', [nama, telepon || null, req.user.id]);
+    res.json({ message: 'Profil berhasil diperbarui', nama });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Ganti password (wajib verifikasi password lama)
+app.put('/auth/ganti-password', verifyToken, async (req, res) => {
+  const { password_lama, password_baru } = req.body;
+
+  if (!password_lama || !password_baru) {
+    return res.status(400).json({ error: 'Password lama dan password baru wajib diisi' });
+  }
+  if (password_baru.length < 6) {
+    return res.status(400).json({ error: 'Password baru minimal 6 karakter' });
+  }
+
+  try {
+    const [rows] = await db.query('select password from users where id = ?', [req.user.id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Akun tidak ditemukan' });
+    }
+
+    const cocok = await bcrypt.compare(password_lama, rows[0].password);
+    if (!cocok) {
+      return res.status(401).json({ error: 'Password lama salah' });
+    }
+
+    const hashBaru = await bcrypt.hash(password_baru, 10);
+    await db.query('update users set password = ? where id = ?', [hashBaru, req.user.id]);
+    res.json({ message: 'Password berhasil diubah' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ==== PRODUCTS (CRUD) ====
 
 app.get('/products', async (req, res) => {
