@@ -1,24 +1,24 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const db = require('./db');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const { verifyToken, verifyManager } = require('./middleware');
-const { GoogleGenAI } = require('@google/genai');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+require("dotenv").config();
+const express = require("express");
+const cors = require("cors");
+const db = require("./db");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const { verifyToken, verifyManager } = require("./middleware");
+const { GoogleGenAI } = require("@google/genai");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const uploadDir = path.join(__dirname, 'uploads');
+const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
-app.use('/uploads', express.static(uploadDir));
+app.use("/uploads", express.static(uploadDir));
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
@@ -32,143 +32,167 @@ const upload = multer({
   storage,
   limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const tipeDiizinkan = ['image/jpeg', 'image/png', 'image/webp'];
+    const tipeDiizinkan = ["image/jpeg", "image/png", "image/webp"];
     if (tipeDiizinkan.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Hanya file JPG, PNG, atau WEBP yang diizinkan'));
+      cb(new Error("Hanya file JPG, PNG, atau WEBP yang diizinkan"));
     }
   },
 });
 
-const JWT_SECRET = 'rahasia_warehouse_ac03';
+const JWT_SECRET = "rahasia_warehouse_ac03";
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // Bikin SKU otomatis, lanjut dari nomor terakhir (SKU001, SKU002, dst)
 async function generateSkuBaru() {
   const [rows] = await db.query(
-    "select sku from products where sku like 'SKU%' order by cast(substring(sku, 4) as unsigned) desc limit 1"
+    "select sku from products where sku like 'SKU%' order by cast(substring(sku, 4) as unsigned) desc limit 1",
   );
-  if (rows.length === 0) return 'SKU001';
-  const angka = parseInt(rows[0].sku.replace('SKU', ''), 10) || 0;
-  return 'SKU' + String(angka + 1).padStart(3, '0');
+  if (rows.length === 0) return "SKU001";
+  const angka = parseInt(rows[0].sku.replace("SKU", ""), 10) || 0;
+  return "SKU" + String(angka + 1).padStart(3, "0");
 }
 
 // ==== UPLOAD GAMBAR ====
 
-app.post('/upload', verifyManager, upload.single('gambar'), (req, res) => {
+app.post("/upload", verifyManager, upload.single("gambar"), (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ error: 'Tidak ada file yang diunggah' });
+    return res.status(400).json({ error: "Tidak ada file yang diunggah" });
   }
   res.json({ url: `/uploads/${req.file.filename}` });
 });
 
 // ==== AUTH ====
 
-app.post('/auth/register', async (req, res) => {
+app.post("/auth/register", async (req, res) => {
   const { nama, email, password, telepon } = req.body;
 
   if (!nama || !email || !password) {
-    return res.status(400).json({ error: 'Nama, email, dan password wajib diisi' });
+    return res
+      .status(400)
+      .json({ error: "Nama, email, dan password wajib diisi" });
   }
 
-  const [existing] = await db.query('select id from users where email = ?', [email]);
+  const [existing] = await db.query("select id from users where email = ?", [
+    email,
+  ]);
   if (existing.length > 0) {
-    return res.status(400).json({ error: 'Email sudah terdaftar' });
+    return res.status(400).json({ error: "Email sudah terdaftar" });
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
 
   await db.query(
-    'insert into users (nama, email, password, role, telepon) values (?, ?, ?, ?, ?)',
-    [nama, email, passwordHash, 'manager', telepon || null]
+    "insert into users (nama, email, password, role, telepon) values (?, ?, ?, ?, ?)",
+    [nama, email, passwordHash, "manager", telepon || null],
   );
 
-  res.status(201).json({ message: 'Akun berhasil dibuat, silakan login' });
+  res.status(201).json({ message: "Akun berhasil dibuat, silakan login" });
 });
 
-app.post('/auth/register-staff', async (req, res) => {
+app.post("/auth/register-staff", async (req, res) => {
   const { nama, email, password, telepon } = req.body;
 
   if (!nama || !email || !password) {
-    return res.status(400).json({ error: 'Nama, email, dan password wajib diisi' });
+    return res
+      .status(400)
+      .json({ error: "Nama, email, dan password wajib diisi" });
   }
 
-  const [existing] = await db.query('select id from users where email = ?', [email]);
+  const [existing] = await db.query("select id from users where email = ?", [
+    email,
+  ]);
   if (existing.length > 0) {
-    return res.status(400).json({ error: 'Email sudah terdaftar' });
+    return res.status(400).json({ error: "Email sudah terdaftar" });
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
 
   await db.query(
-    'insert into users (nama, email, password, role, telepon) values (?, ?, ?, ?, ?)',
-    [nama, email, passwordHash, 'staff', telepon || null]
+    "insert into users (nama, email, password, role, telepon) values (?, ?, ?, ?, ?)",
+    [nama, email, passwordHash, "staff", telepon || null],
   );
 
-  res.status(201).json({ message: 'Akun berhasil dibuat, silakan login' });
+  res.status(201).json({ message: "Akun berhasil dibuat, silakan login" });
 });
 
-app.post('/auth/login', async (req, res) => {
+app.post("/auth/login", async (req, res) => {
   const { email, password } = req.body;
 
-  const [rows] = await db.query('select id, nama, email, password, role from users where email = ?', [email]);
+  const [rows] = await db.query(
+    "select id, nama, email, password, role from users where email = ?",
+    [email],
+  );
 
   if (rows.length === 0) {
-    return res.status(401).json({ error: 'Email tidak ditemukan' });
+    return res.status(401).json({ error: "Email tidak ditemukan" });
   }
 
   const user = rows[0];
   const cocok = await bcrypt.compare(password, user.password);
 
   if (!cocok) {
-    return res.status(401).json({ error: 'Password salah' });
+    return res.status(401).json({ error: "Password salah" });
   }
 
   const token = jwt.sign(
     { id: user.id, nama: user.nama, role: user.role },
     JWT_SECRET,
-    { expiresIn: '7d' }
+    { expiresIn: "7d" },
   );
 
   res.json({ token, nama: user.nama, role: user.role });
 });
 
 // Reset password (khusus akun manager, dipakai halaman /lupa-password di web)
-app.post('/auth/reset-password', async (req, res) => {
+app.post("/auth/reset-password", async (req, res) => {
   const { email, password_baru } = req.body;
 
   if (!email || !password_baru) {
-    return res.status(400).json({ error: 'Email dan password baru wajib diisi' });
+    return res
+      .status(400)
+      .json({ error: "Email dan password baru wajib diisi" });
   }
   if (password_baru.length < 6) {
-    return res.status(400).json({ error: 'Password minimal 6 karakter' });
+    return res.status(400).json({ error: "Password minimal 6 karakter" });
   }
 
   try {
-    const [rows] = await db.query('select id, role from users where email = ?', [email]);
+    const [rows] = await db.query(
+      "select id, role from users where email = ?",
+      [email],
+    );
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Email tidak ditemukan' });
+      return res.status(404).json({ error: "Email tidak ditemukan" });
     }
-    if (rows[0].role !== 'manager') {
-      return res.status(403).json({ error: 'Reset password lewat web hanya untuk akun Manager' });
+    if (rows[0].role !== "manager") {
+      return res
+        .status(403)
+        .json({ error: "Reset password lewat web hanya untuk akun Manager" });
     }
 
     const passwordHash = await bcrypt.hash(password_baru, 10);
-    await db.query('update users set password = ? where id = ?', [passwordHash, rows[0].id]);
+    await db.query("update users set password = ? where id = ?", [
+      passwordHash,
+      rows[0].id,
+    ]);
 
-    res.json({ message: 'Password berhasil diubah' });
+    res.json({ message: "Password berhasil diubah" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Ambil data profil user yang sedang login
-app.get('/auth/profil', verifyToken, async (req, res) => {
+app.get("/auth/profil", verifyToken, async (req, res) => {
   try {
-    const [rows] = await db.query('select id, nama, email, telepon, role from users where id = ?', [req.user.id]);
+    const [rows] = await db.query(
+      "select id, nama, email, telepon, role from users where id = ?",
+      [req.user.id],
+    );
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Akun tidak ditemukan' });
+      return res.status(404).json({ error: "Akun tidak ditemukan" });
     }
     res.json(rows[0]);
   } catch (err) {
@@ -177,46 +201,136 @@ app.get('/auth/profil', verifyToken, async (req, res) => {
 });
 
 // Update nama & telepon (email dikunci, tidak bisa diubah dari sini)
-app.put('/auth/profil', verifyToken, async (req, res) => {
+app.put("/auth/profil", verifyToken, async (req, res) => {
   const { nama, telepon } = req.body;
 
   if (!nama) {
-    return res.status(400).json({ error: 'Nama wajib diisi' });
+    return res.status(400).json({ error: "Nama wajib diisi" });
   }
 
   try {
-    await db.query('update users set nama = ?, telepon = ? where id = ?', [nama, telepon || null, req.user.id]);
-    res.json({ message: 'Profil berhasil diperbarui', nama });
+    await db.query("update users set nama = ?, telepon = ? where id = ?", [
+      nama,
+      telepon || null,
+      req.user.id,
+    ]);
+    res.json({ message: "Profil berhasil diperbarui", nama });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Ganti password (wajib verifikasi password lama)
-app.put('/auth/ganti-password', verifyToken, async (req, res) => {
+app.put("/auth/ganti-password", verifyToken, async (req, res) => {
   const { password_lama, password_baru } = req.body;
 
   if (!password_lama || !password_baru) {
-    return res.status(400).json({ error: 'Password lama dan password baru wajib diisi' });
+    return res
+      .status(400)
+      .json({ error: "Password lama dan password baru wajib diisi" });
   }
   if (password_baru.length < 6) {
-    return res.status(400).json({ error: 'Password baru minimal 6 karakter' });
+    return res.status(400).json({ error: "Password baru minimal 6 karakter" });
   }
 
   try {
-    const [rows] = await db.query('select password from users where id = ?', [req.user.id]);
+    const [rows] = await db.query("select password from users where id = ?", [
+      req.user.id,
+    ]);
     if (rows.length === 0) {
-      return res.status(404).json({ error: 'Akun tidak ditemukan' });
+      return res.status(404).json({ error: "Akun tidak ditemukan" });
     }
 
     const cocok = await bcrypt.compare(password_lama, rows[0].password);
     if (!cocok) {
-      return res.status(401).json({ error: 'Password lama salah' });
+      return res.status(401).json({ error: "Password lama salah" });
     }
 
     const hashBaru = await bcrypt.hash(password_baru, 10);
-    await db.query('update users set password = ? where id = ?', [hashBaru, req.user.id]);
-    res.json({ message: 'Password berhasil diubah' });
+    await db.query("update users set password = ? where id = ?", [
+      hashBaru,
+      req.user.id,
+    ]);
+    res.json({ message: "Password berhasil diubah" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==== PENGATURAN GUDANG ====
+
+app.get("/pengaturan", async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      "select nama_gudang, telepon, alamat, provinsi, kota, kecamatan, kode_pos, catatan, latitude, longitude from pengaturan_gudang where id = 1",
+    );
+    res.json(rows[0] || {});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/pengaturan", verifyManager, async (req, res) => {
+  const {
+    nama_gudang,
+    telepon,
+    alamat,
+    provinsi,
+    kota,
+    kecamatan,
+    kode_pos,
+    catatan,
+    latitude,
+    longitude,
+  } = req.body;
+
+  try {
+    await db.query(
+      "update pengaturan_gudang set nama_gudang = ?, telepon = ?, alamat = ?, provinsi = ?, kota = ?, kecamatan = ?, kode_pos = ?, catatan = ?, latitude = ?, longitude = ? where id = 1",
+      [
+        nama_gudang || null,
+        telepon || null,
+        alamat || null,
+        provinsi || null,
+        kota || null,
+        kecamatan || null,
+        kode_pos || null,
+        catatan || null,
+        latitude || null,
+        longitude || null,
+      ],
+    );
+    res.json({ message: "Pengaturan gudang berhasil disimpan" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==== KELUHAN / HUBUNGI KAMI ====
+
+app.post("/keluhan", verifyToken, async (req, res) => {
+  const { pesan } = req.body;
+
+  if (!pesan) {
+    return res.status(400).json({ error: "Pesan wajib diisi" });
+  }
+
+  try {
+    const [userRows] = await db.query("select nama from users where id = ?", [
+      req.user.id,
+    ]);
+    const nama = userRows[0] ? userRows[0].nama : "Tidak diketahui";
+
+    await db.query(
+      "insert into keluhan (user_id, nama, pesan) values (?, ?, ?)",
+      [req.user.id, nama, pesan],
+    );
+    res
+      .status(201)
+      .json({
+        message:
+          "Pesan berhasil dikirim, tim kami akan segera menghubungi kamu",
+      });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -224,79 +338,112 @@ app.put('/auth/ganti-password', verifyToken, async (req, res) => {
 
 // ==== PRODUCTS (CRUD) ====
 
-app.get('/products', async (req, res) => {
+app.get("/products", async (req, res) => {
   try {
-    const [rows] = await db.query('select id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum from products');
+    const [rows] = await db.query(
+      "select id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum from products",
+    );
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/products', verifyManager, async (req, res) => {
-  const { nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum } = req.body;
+app.post("/products", verifyManager, async (req, res) => {
+  const { nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum } =
+    req.body;
 
   try {
     const skuBaru = await generateSkuBaru();
     await db.query(
-      'insert into products (sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum) values (?, ?, ?, ?, ?, ?, ?, ?)',
-      [skuBaru, nama, kategori, satuan, harga || 0, gambar || null, stok_saat_ini, stok_minimum]
+      "insert into products (sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum) values (?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        skuBaru,
+        nama,
+        kategori,
+        satuan,
+        harga || 0,
+        gambar || null,
+        stok_saat_ini,
+        stok_minimum,
+      ],
     );
-    res.status(201).json({ message: 'Produk berhasil ditambahkan', sku: skuBaru });
+    res
+      .status(201)
+      .json({ message: "Produk berhasil ditambahkan", sku: skuBaru });
   } catch (err) {
-    res.status(400).json({ error: 'Gagal menambahkan produk' });
+    res.status(400).json({ error: "Gagal menambahkan produk" });
   }
 });
 
-app.put('/products/:id', verifyManager, async (req, res) => {
-  const { nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum } = req.body;
+app.put("/products/:id", verifyManager, async (req, res) => {
+  const { nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum } =
+    req.body;
 
   await db.query(
-    'update products set nama = ?, kategori = ?, satuan = ?, harga = ?, gambar = ?, stok_saat_ini = ?, stok_minimum = ? where id = ?',
-    [nama, kategori, satuan, harga || 0, gambar || null, stok_saat_ini, stok_minimum, req.params.id]
+    "update products set nama = ?, kategori = ?, satuan = ?, harga = ?, gambar = ?, stok_saat_ini = ?, stok_minimum = ? where id = ?",
+    [
+      nama,
+      kategori,
+      satuan,
+      harga || 0,
+      gambar || null,
+      stok_saat_ini,
+      stok_minimum,
+      req.params.id,
+    ],
   );
-  res.json({ message: 'Produk berhasil diupdate' });
+  res.json({ message: "Produk berhasil diupdate" });
 });
 
-app.delete('/products/:id', verifyManager, async (req, res) => {
-  await db.query('delete from products where id = ?', [req.params.id]);
-  res.json({ message: 'Produk berhasil dihapus' });
+app.delete("/products/:id", verifyManager, async (req, res) => {
+  await db.query("delete from products where id = ?", [req.params.id]);
+  res.json({ message: "Produk berhasil dihapus" });
 });
 
 // ==== TRANSACTIONS ====
 
-app.post('/transactions', verifyToken, async (req, res) => {
+app.post("/transactions", verifyToken, async (req, res) => {
   const { sku, tipe, jumlah, catatan } = req.body;
 
-  const [produk] = await db.query('select id, stok_saat_ini from products where sku = ?', [sku]);
+  const [produk] = await db.query(
+    "select id, stok_saat_ini from products where sku = ?",
+    [sku],
+  );
 
   if (produk.length === 0) {
-    return res.status(404).json({ error: 'SKU tidak ditemukan' });
+    return res.status(404).json({ error: "SKU tidak ditemukan" });
   }
 
   const product = produk[0];
 
-  if (tipe === 'out' && product.stok_saat_ini < jumlah) {
-    return res.status(400).json({ error: 'Stok tidak mencukupi' });
+  if (tipe === "out" && product.stok_saat_ini < jumlah) {
+    return res.status(400).json({ error: "Stok tidak mencukupi" });
   }
 
-  const stokBaru = tipe === 'in'
-    ? product.stok_saat_ini + jumlah
-    : product.stok_saat_ini - jumlah;
+  const stokBaru =
+    tipe === "in"
+      ? product.stok_saat_ini + jumlah
+      : product.stok_saat_ini - jumlah;
 
   await db.query(
-    'insert into stock_transactions (product_id, user_id, tipe, jumlah, catatan) values (?, ?, ?, ?, ?)',
-    [product.id, req.user.id, tipe, jumlah, catatan || null]
+    "insert into stock_transactions (product_id, user_id, tipe, jumlah, catatan) values (?, ?, ?, ?, ?)",
+    [product.id, req.user.id, tipe, jumlah, catatan || null],
   );
 
-  await db.query('update products set stok_saat_ini = ? where id = ?', [stokBaru, product.id]);
+  await db.query("update products set stok_saat_ini = ? where id = ?", [
+    stokBaru,
+    product.id,
+  ]);
 
-  res.status(201).json({ message: 'Transaksi berhasil dicatat', stok_baru: stokBaru });
+  res
+    .status(201)
+    .json({ message: "Transaksi berhasil dicatat", stok_baru: stokBaru });
 });
 
-app.get('/transactions/recent', async (req, res) => {
+app.get("/transactions/recent", async (req, res) => {
   const [rows] = await db.query(
-    'select stock_transactions.id, products.nama, products.sku, products.gambar, stock_transactions.tipe, stock_transactions.jumlah, stock_transactions.catatan, stock_transactions.created_at, users.nama as nama_staf from stock_transactions, products, users where stock_transactions.product_id = products.id and stock_transactions.user_id = users.id order by stock_transactions.created_at desc limit 50'
+    "select stock_transactions.id, products.nama, products.sku, products.gambar, stock_transactions.tipe, stock_transactions.jumlah, stock_transactions.catatan, stock_transactions.created_at, users.nama as nama_staf from stock_transactions, products, users where stock_transactions.product_id = products.id and stock_transactions.user_id = users.id order by stock_transactions.created_at desc limit 50",
   );
   res.json(rows);
 });
@@ -307,7 +454,7 @@ function tunggu(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const DAFTAR_MODEL = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+const DAFTAR_MODEL = ["gemini-flash-latest", "gemini-flash-lite-latest"];
 
 function ambilRetryDelay(err) {
   try {
@@ -325,37 +472,47 @@ async function generateContentDenganRetry(prompt) {
   for (const model of DAFTAR_MODEL) {
     for (let percobaan = 1; percobaan <= 3; percobaan++) {
       try {
-        const response = await ai.models.generateContent({ model, contents: prompt });
+        const response = await ai.models.generateContent({
+          model,
+          contents: prompt,
+        });
         return response;
       } catch (err) {
         errorTerakhir = err;
-        const modelSibuk = err.message && err.message.includes('UNAVAILABLE');
-        const kenaRateLimit = err.message && err.message.includes('RESOURCE_EXHAUSTED');
+        const modelSibuk = err.message && err.message.includes("UNAVAILABLE");
+        const kenaRateLimit =
+          err.message && err.message.includes("RESOURCE_EXHAUSTED");
 
         if (!modelSibuk && !kenaRateLimit) throw err;
 
         const delaySaran = ambilRetryDelay(err);
         const delay = delaySaran || percobaan * 3000;
 
-        console.log(`${model}: ${kenaRateLimit ? 'kena rate limit' : 'sibuk'}, tunggu ${delay / 1000}s lalu coba lagi (percobaan ${percobaan}/3)...`);
+        console.log(
+          `${model}: ${kenaRateLimit ? "kena rate limit" : "sibuk"}, tunggu ${delay / 1000}s lalu coba lagi (percobaan ${percobaan}/3)...`,
+        );
         await tunggu(delay);
       }
     }
-    console.log(`${model} tetap gagal setelah 3 percobaan, coba model berikutnya...`);
+    console.log(
+      `${model} tetap gagal setelah 3 percobaan, coba model berikutnya...`,
+    );
   }
 
   throw errorTerakhir;
 }
 
-app.post('/ai-insights/generate', verifyManager, async (req, res) => {
+app.post("/ai-insights/generate", verifyManager, async (req, res) => {
   try {
-    const [produk] = await db.query('select id, sku, nama, stok_saat_ini, stok_minimum from products');
+    const [produk] = await db.query(
+      "select id, sku, nama, stok_saat_ini, stok_minimum from products",
+    );
 
     const dataAnalisis = [];
     for (const p of produk) {
       const [rows] = await db.query(
         'select sum(jumlah) as total_keluar from stock_transactions where product_id = ? and tipe = "out" and created_at >= date_sub(now(), interval 30 day)',
-        [p.id]
+        [p.id],
       );
       dataAnalisis.push({
         sku: p.sku,
@@ -376,7 +533,7 @@ Untuk setiap produk, perkirakan berapa hari lagi stoknya akan habis (berdasarkan
     const response = await generateContentDenganRetry(prompt);
 
     let teksJson = response.text.trim();
-    teksJson = teksJson.replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
+    teksJson = teksJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "");
     const hasilAnalisis = JSON.parse(teksJson);
 
     for (const hasil of hasilAnalisis) {
@@ -384,84 +541,110 @@ Untuk setiap produk, perkirakan berapa hari lagi stoknya akan habis (berdasarkan
       if (!produkCocok) continue;
 
       await db.query(
-        'insert into ai_insights (product_id, rekomendasi, jumlah_restock_disarankan) values (?, ?, ?)',
-        [produkCocok.id, hasil.alasan, hasil.rekomendasi_restock]
+        "insert into ai_insights (product_id, rekomendasi, jumlah_restock_disarankan) values (?, ?, ?)",
+        [produkCocok.id, hasil.alasan, hasil.rekomendasi_restock],
       );
     }
 
-    res.json({ message: 'Analisis AI berhasil dibuat', hasil: hasilAnalisis });
+    res.json({ message: "Analisis AI berhasil dibuat", hasil: hasilAnalisis });
   } catch (err) {
     let pesanUser = err.message;
-    if (err.message && err.message.includes('UNAVAILABLE')) {
-      pesanUser = 'Server Gemini sedang sibuk. Coba lagi dalam beberapa menit.';
-    } else if (err.message && err.message.includes('RESOURCE_EXHAUSTED')) {
-      pesanUser = 'Batas pemakaian Gemini API (tier gratis) tercapai untuk sementara. Tunggu 1-2 menit sebelum generate lagi.';
+    if (err.message && err.message.includes("UNAVAILABLE")) {
+      pesanUser = "Server Gemini sedang sibuk. Coba lagi dalam beberapa menit.";
+    } else if (err.message && err.message.includes("RESOURCE_EXHAUSTED")) {
+      pesanUser =
+        "Batas pemakaian Gemini API (tier gratis) tercapai untuk sementara. Tunggu 1-2 menit sebelum generate lagi.";
     }
     res.status(500).json({ error: pesanUser });
   }
 });
 
-app.get('/ai-insights', verifyManager, async (req, res) => {
+app.get("/ai-insights", verifyManager, async (req, res) => {
   const [rows] = await db.query(
-    'select ai_insights.id, products.nama, products.sku, products.gambar, products.stok_saat_ini, products.stok_minimum, ai_insights.rekomendasi, ai_insights.jumlah_restock_disarankan, ai_insights.generated_at, case when ai_insights.generated_at = (select max(b.generated_at) from ai_insights b where b.product_id = ai_insights.product_id) then 1 else 0 end as is_terbaru from ai_insights, products where ai_insights.product_id = products.id order by ai_insights.generated_at desc limit 50'
+    "select ai_insights.id, products.nama, products.sku, products.gambar, products.stok_saat_ini, products.stok_minimum, ai_insights.rekomendasi, ai_insights.jumlah_restock_disarankan, ai_insights.generated_at, case when ai_insights.generated_at = (select max(b.generated_at) from ai_insights b where b.product_id = ai_insights.product_id) then 1 else 0 end as is_terbaru from ai_insights, products where ai_insights.product_id = products.id order by ai_insights.generated_at desc limit 50",
   );
   res.json(rows);
 });
 
 // ==== PURCHASE ORDERS ====
 
-app.post('/purchase-orders', verifyManager, async (req, res) => {
+app.post("/purchase-orders", verifyManager, async (req, res) => {
   const { sku, jumlah, catatan } = req.body;
 
-  const [produk] = await db.query('select id from products where sku = ?', [sku]);
+  const [produk] = await db.query("select id from products where sku = ?", [
+    sku,
+  ]);
 
   if (produk.length === 0) {
-    return res.status(404).json({ error: 'SKU tidak ditemukan' });
+    return res.status(404).json({ error: "SKU tidak ditemukan" });
   }
 
   await db.query(
-    'insert into purchase_orders (product_id, jumlah, catatan) values (?, ?, ?)',
-    [produk[0].id, jumlah, catatan || null]
+    "insert into purchase_orders (product_id, jumlah, catatan) values (?, ?, ?)",
+    [produk[0].id, jumlah, catatan || null],
   );
 
-  res.status(201).json({ message: 'Purchase Order berhasil dibuat' });
+  res.status(201).json({ message: "Purchase Order berhasil dibuat" });
 });
 
-app.get('/purchase-orders', verifyManager, async (req, res) => {
+app.get("/purchase-orders", verifyManager, async (req, res) => {
   const [rows] = await db.query(
-    'select purchase_orders.id, products.nama, products.sku, products.harga, products.gambar, purchase_orders.jumlah, purchase_orders.status, purchase_orders.catatan, purchase_orders.created_at from purchase_orders, products where purchase_orders.product_id = products.id order by purchase_orders.created_at desc'
+    "select purchase_orders.id, products.nama, products.sku, products.harga, products.gambar, purchase_orders.jumlah, purchase_orders.status, purchase_orders.catatan, purchase_orders.created_at from purchase_orders, products where purchase_orders.product_id = products.id order by purchase_orders.created_at desc",
   );
   res.json(rows);
 });
 
-app.put('/purchase-orders/:id/selesai', verifyManager, async (req, res) => {
-  const [po] = await db.query('select id, product_id, jumlah, status from purchase_orders where id = ?', [req.params.id]);
-
-  if (po.length === 0) {
-    return res.status(404).json({ error: 'Purchase Order tidak ditemukan' });
-  }
-
-  if (po[0].status === 'selesai') {
-    return res.status(400).json({ error: 'Purchase Order ini sudah selesai sebelumnya' });
-  }
-
-  const [produk] = await db.query('select stok_saat_ini from products where id = ?', [po[0].product_id]);
-  const stokBaru = produk[0].stok_saat_ini + po[0].jumlah;
-
-  await db.query('update products set stok_saat_ini = ? where id = ?', [stokBaru, po[0].product_id]);
-
-  await db.query(
-    'insert into stock_transactions (product_id, user_id, tipe, jumlah, catatan) values (?, ?, ?, ?, ?)',
-    [po[0].product_id, req.user.id, 'in', po[0].jumlah, `Restock dari Purchase Order #${po[0].id}`]
+app.put("/purchase-orders/:id/selesai", verifyManager, async (req, res) => {
+  const [po] = await db.query(
+    "select id, product_id, jumlah, status from purchase_orders where id = ?",
+    [req.params.id],
   );
 
-  await db.query('update purchase_orders set status = ? where id = ?', ['selesai', req.params.id]);
+  if (po.length === 0) {
+    return res.status(404).json({ error: "Purchase Order tidak ditemukan" });
+  }
 
-  res.json({ message: 'Purchase Order selesai, stok berhasil diperbarui', stok_baru: stokBaru });
+  if (po[0].status === "selesai") {
+    return res
+      .status(400)
+      .json({ error: "Purchase Order ini sudah selesai sebelumnya" });
+  }
+
+  const [produk] = await db.query(
+    "select stok_saat_ini from products where id = ?",
+    [po[0].product_id],
+  );
+  const stokBaru = produk[0].stok_saat_ini + po[0].jumlah;
+
+  await db.query("update products set stok_saat_ini = ? where id = ?", [
+    stokBaru,
+    po[0].product_id,
+  ]);
+
+  await db.query(
+    "insert into stock_transactions (product_id, user_id, tipe, jumlah, catatan) values (?, ?, ?, ?, ?)",
+    [
+      po[0].product_id,
+      req.user.id,
+      "in",
+      po[0].jumlah,
+      `Restock dari Purchase Order #${po[0].id}`,
+    ],
+  );
+
+  await db.query("update purchase_orders set status = ? where id = ?", [
+    "selesai",
+    req.params.id,
+  ]);
+
+  res.json({
+    message: "Purchase Order selesai, stok berhasil diperbarui",
+    stok_baru: stokBaru,
+  });
 });
 
 // ==== START SERVER ====
 
 app.listen(3000, () => {
-  console.log('Server jalan di http://localhost:3000');
+  console.log("Server jalan di http://localhost:3000");
 });
