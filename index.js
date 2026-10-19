@@ -11,8 +11,20 @@ const path = require("path");
 const fs = require("fs");
 
 const app = express();
-app.use(cors());
+
+// Konfigurasi CORS agar bisa diakses dari frontend Vercel & Mobile
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
+
+// Endpoint Root untuk cek status server
+app.get("/", (req, res) => {
+  res.json({ status: "success", message: "Server Backend Stockin Aktif dan Berjalan Normal!" });
+});
 
 const uploadDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadDir)) {
