@@ -4,6 +4,9 @@ const cors = require("cors");
 const db = require("./db");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
+const dns = require("dns").promises;
+const { google } = require("googleapis");
 const { verifyToken, verifyManager } = require("./middleware");
 const { GoogleGenAI } = require("@google/genai");
 const multer = require("multer");
@@ -66,6 +69,178 @@ async function generateSkuBaru() {
   return "SKU" + String(angka + 1).padStart(3, "0");
 }
 
+// ==== EMAIL & OTP ====
+
+const MIN_PASSWORD = 8;
+const POLA_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const KODE_BERLAKU_MENIT = 10;
+const JEDA_KIRIM_DETIK = 60;
+const MAKS_PERCOBAAN = 5;
+
+function escapeHtml(teks) {
+  return String(teks)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function kirimError(res, err) {
+  res.status(err.status || 500).json({ error: err.message });
+}
+
+// Cek apakah domain email benar-benar punya server email (MX record)
+async function domainEmailValid(email) {
+  const domain = email.split("@")[1];
+  try {
+    const mx = await dns.resolveMx(domain);
+    return mx.length > 0;
+  } catch (err) {
+    if (err.code === "ENOTFOUND" || err.code === "ENODATA") return false;
+    // masalah DNS sementara, jangan blokir pendaftar
+    return true;
+  }
+}
+
+function buatKode() {
+  return String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+}
+
+function templateEmailKode(nama, kode, tujuan) {
+  const keterangan =
+    tujuan === "verifikasi"
+      ? "Gunakan kode berikut untuk memverifikasi email akun Stockin kamu."
+      : "Gunakan kode berikut untuk mengatur ulang password akun Stockin kamu.";
+  return `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#0f172a">
+<h2 style="color:#1E3A8A;margin:0 0 12px">Stockin</h2>
+<p>Halo ${escapeHtml(nama)},</p>
+<p>${keterangan}</p>
+<p style="font-size:32px;font-weight:bold;letter-spacing:8px;background:#E8EEFC;color:#1E3A8A;padding:16px;text-align:center;border-radius:12px;margin:20px 0">${kode}</p>
+<p>Kode berlaku ${KODE_BERLAKU_MENIT} menit. Jangan bagikan kode ini ke siapa pun.</p>
+<p style="color:#64748b;font-size:13px">Jika kamu tidak merasa memintanya, abaikan email ini.</p>
+</div>`;
+}
+
+// Kirim email lewat Gmail API (HTTPS), bukan SMTP
+async function kirimEmail(tujuan, subjek, html) {
+  if (
+    !process.env.GOOGLE_CLIENT_ID ||
+    !process.env.GOOGLE_CLIENT_SECRET ||
+    !process.env.GOOGLE_REFRESH_TOKEN ||
+    !process.env.EMAIL_PENGIRIM
+  ) {
+    throw new Error("Konfigurasi Gmail API belum lengkap (cek variabel environment)");
+  }
+
+  const oauth2 = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    "https://developers.google.com/oauthplayground",
+  );
+  oauth2.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  const gmail = google.gmail({ version: "v1", auth: oauth2 });
+
+  const pesan = [
+    `From: Stockin <${process.env.EMAIL_PENGIRIM}>`,
+    `To: ${tujuan}`,
+    `Subject: =?UTF-8?B?${Buffer.from(subjek).toString("base64")}?=`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    html,
+  ].join("\r\n");
+
+  const raw = Buffer.from(pesan)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+  await gmail.users.messages.send({ userId: "me", requestBody: { raw } });
+}
+
+// Buat kode baru, simpan hash-nya, lalu kirim ke email
+async function kirimKodeOtp(email, tujuan, nama) {
+  const [terakhir] = await db.query(
+    "select timestampdiff(second, created_at, now()) as detik from kode_verifikasi where email = ? and tujuan = ? order by id desc limit 1",
+    [email, tujuan],
+  );
+  if (terakhir.length > 0 && terakhir[0].detik < JEDA_KIRIM_DETIK) {
+    const sisa = JEDA_KIRIM_DETIK - terakhir[0].detik;
+    const err = new Error(`Tunggu ${sisa} detik sebelum meminta kode baru`);
+    err.status = 429;
+    throw err;
+  }
+
+  const kode = buatKode();
+  const kodeHash = await bcrypt.hash(kode, 10);
+
+  await db.query(
+    "delete from kode_verifikasi where email = ? and tujuan = ?",
+    [email, tujuan],
+  );
+  await db.query(
+    "insert into kode_verifikasi (email, tujuan, kode_hash, kadaluarsa) values (?, ?, ?, date_add(now(), interval ? minute))",
+    [email, tujuan, kodeHash, KODE_BERLAKU_MENIT],
+  );
+
+  const judul =
+    tujuan === "verifikasi"
+      ? "Kode verifikasi email Stockin"
+      : "Kode reset password Stockin";
+
+  try {
+    await kirimEmail(email, judul, templateEmailKode(nama, kode, tujuan));
+  } catch (err) {
+    console.error("Gagal kirim email OTP:", err.message);
+    await db.query(
+      "delete from kode_verifikasi where email = ? and tujuan = ?",
+      [email, tujuan],
+    );
+    const errBaru = new Error("Gagal mengirim email. Coba lagi beberapa saat.");
+    errBaru.status = 502;
+    throw errBaru;
+  }
+}
+
+// Cocokkan kode yang diketik user dengan yang tersimpan
+async function cekKodeOtp(email, tujuan, kode) {
+  const [rows] = await db.query(
+    "select id, kode_hash, percobaan, kadaluarsa > now() as masih_berlaku from kode_verifikasi where email = ? and tujuan = ? order by id desc limit 1",
+    [email, tujuan],
+  );
+  if (rows.length === 0) {
+    return { ok: false, error: "Kode tidak ditemukan. Minta kode baru." };
+  }
+
+  const data = rows[0];
+  if (!Number(data.masih_berlaku)) {
+    return { ok: false, error: "Kode sudah kedaluwarsa. Minta kode baru." };
+  }
+  if (data.percobaan >= MAKS_PERCOBAAN) {
+    return { ok: false, error: "Terlalu banyak percobaan salah. Minta kode baru." };
+  }
+
+  const cocok = await bcrypt.compare(kode, data.kode_hash);
+  if (!cocok) {
+    await db.query(
+      "update kode_verifikasi set percobaan = percobaan + 1 where id = ?",
+      [data.id],
+    );
+    const sisa = MAKS_PERCOBAAN - data.percobaan - 1;
+    return {
+      ok: false,
+      error:
+        sisa > 0
+          ? `Kode salah. Sisa percobaan: ${sisa}`
+          : "Kode salah. Terlalu banyak percobaan, minta kode baru.",
+    };
+  }
+
+  return { ok: true };
+}
+
 // ==== UPLOAD GAMBAR ====
 
 app.post("/upload", verifyManager, upload.single("gambar"), (req, res) => {
@@ -86,21 +261,112 @@ app.post("/auth/register", async (req, res) => {
       .json({ error: "Nama, email, dan password wajib diisi" });
   }
 
-  const [existing] = await db.query("select id from users where email = ?", [
-    email,
-  ]);
-  if (existing.length > 0) {
-    return res.status(400).json({ error: "Email sudah terdaftar" });
+  const emailBersih = String(email).trim().toLowerCase();
+
+  if (!POLA_EMAIL.test(emailBersih)) {
+    return res.status(400).json({ error: "Format email tidak valid" });
+  }
+  if (password.length < MIN_PASSWORD) {
+    return res
+      .status(400)
+      .json({ error: `Password minimal ${MIN_PASSWORD} karakter` });
+  }
+  if (!(await domainEmailValid(emailBersih))) {
+    return res.status(400).json({
+      error: "Domain email tidak ditemukan. Gunakan email aktif, contoh: nama@gmail.com",
+    });
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  try {
+    const [existing] = await db.query(
+      "select id, email_terverifikasi from users where email = ?",
+      [emailBersih],
+    );
 
-  await db.query(
-    "insert into users (nama, email, password, role, telepon) values (?, ?, ?, ?, ?)",
-    [nama, email, passwordHash, "manager", telepon || null],
-  );
+    const passwordHash = await bcrypt.hash(password, 10);
 
-  res.status(201).json({ message: "Akun berhasil dibuat, silakan login" });
+    if (existing.length > 0) {
+      if (Number(existing[0].email_terverifikasi) === 1) {
+        return res.status(400).json({ error: "Email sudah terdaftar" });
+      }
+      // akun lama yang belum sempat diverifikasi: perbarui data, kirim kode baru
+      await db.query(
+        "update users set nama = ?, password = ?, telepon = ? where id = ?",
+        [nama, passwordHash, telepon || null, existing[0].id],
+      );
+    } else {
+      await db.query(
+        "insert into users (nama, email, password, role, telepon, email_terverifikasi) values (?, ?, ?, ?, ?, 0)",
+        [nama, emailBersih, passwordHash, "manager", telepon || null],
+      );
+    }
+
+    await kirimKodeOtp(emailBersih, "verifikasi", nama);
+
+    res.status(201).json({
+      message: "Akun dibuat. Kode verifikasi sudah dikirim ke email kamu.",
+      perlu_verifikasi: true,
+      email: emailBersih,
+    });
+  } catch (err) {
+    kirimError(res, err);
+  }
+});
+
+app.post("/auth/verifikasi-email", async (req, res) => {
+  const { email, kode } = req.body;
+
+  if (!email || !kode) {
+    return res.status(400).json({ error: "Email dan kode wajib diisi" });
+  }
+
+  const emailBersih = String(email).trim().toLowerCase();
+
+  try {
+    const hasil = await cekKodeOtp(emailBersih, "verifikasi", String(kode).trim());
+    if (!hasil.ok) {
+      return res.status(400).json({ error: hasil.error });
+    }
+
+    await db.query("update users set email_terverifikasi = 1 where email = ?", [
+      emailBersih,
+    ]);
+    await db.query(
+      "delete from kode_verifikasi where email = ? and tujuan = ?",
+      [emailBersih, "verifikasi"],
+    );
+
+    res.json({ message: "Email berhasil diverifikasi, silakan login" });
+  } catch (err) {
+    kirimError(res, err);
+  }
+});
+
+app.post("/auth/kirim-ulang-kode", async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: "Email wajib diisi" });
+  }
+
+  const emailBersih = String(email).trim().toLowerCase();
+
+  try {
+    const [rows] = await db.query(
+      "select nama, email_terverifikasi from users where email = ?",
+      [emailBersih],
+    );
+    if (rows.length === 0 || Number(rows[0].email_terverifikasi) === 1) {
+      return res
+        .status(400)
+        .json({ error: "Akun tidak ditemukan atau sudah terverifikasi" });
+    }
+
+    await kirimKodeOtp(emailBersih, "verifikasi", rows[0].nama);
+    res.json({ message: "Kode baru sudah dikirim ke email kamu" });
+  } catch (err) {
+    kirimError(res, err);
+  }
 });
 
 app.post("/auth/register-staff", async (req, res) => {
@@ -110,6 +376,11 @@ app.post("/auth/register-staff", async (req, res) => {
     return res
       .status(400)
       .json({ error: "Nama, email, dan password wajib diisi" });
+  }
+  if (password.length < MIN_PASSWORD) {
+    return res
+      .status(400)
+      .json({ error: `Password minimal ${MIN_PASSWORD} karakter` });
   }
 
   const [existing] = await db.query("select id from users where email = ?", [
@@ -132,8 +403,12 @@ app.post("/auth/register-staff", async (req, res) => {
 app.post("/auth/login", async (req, res) => {
   const { email, password } = req.body;
 
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email dan password wajib diisi" });
+  }
+
   const [rows] = await db.query(
-    "select id, nama, email, password, role from users where email = ?",
+    "select id, nama, email, password, role, email_terverifikasi from users where email = ?",
     [email],
   );
 
@@ -148,6 +423,14 @@ app.post("/auth/login", async (req, res) => {
     return res.status(401).json({ error: "Password salah" });
   }
 
+  if (Number(user.email_terverifikasi) !== 1) {
+    return res.status(403).json({
+      error: "Email belum diverifikasi",
+      perlu_verifikasi: true,
+      email: user.email,
+    });
+  }
+
   const token = jwt.sign(
     { id: user.id, nama: user.nama, role: user.role },
     JWT_SECRET,
@@ -157,42 +440,79 @@ app.post("/auth/login", async (req, res) => {
   res.json({ token, nama: user.nama, role: user.role });
 });
 
-// Reset password (khusus akun manager, dipakai halaman /lupa-password di web)
-app.post("/auth/reset-password", async (req, res) => {
-  const { email, password_baru } = req.body;
+// Lupa password langkah 1: kirim kode OTP ke email (khusus akun manager)
+app.post("/auth/lupa-password", async (req, res) => {
+  const { email } = req.body;
 
-  if (!email || !password_baru) {
+  if (!email || !POLA_EMAIL.test(String(email).trim())) {
+    return res.status(400).json({ error: "Format email tidak valid" });
+  }
+
+  const emailBersih = String(email).trim().toLowerCase();
+
+  try {
+    const [rows] = await db.query(
+      "select id, nama, role from users where email = ?",
+      [emailBersih],
+    );
+
+    if (rows.length > 0 && rows[0].role === "manager") {
+      await kirimKodeOtp(emailBersih, "reset", rows[0].nama);
+    }
+
+    // jawaban sama untuk email terdaftar maupun tidak
+    res.json({
+      message: "Jika email terdaftar sebagai Manager, kode reset sudah dikirim",
+    });
+  } catch (err) {
+    kirimError(res, err);
+  }
+});
+
+// Lupa password langkah 2: cek kode OTP, lalu ganti password
+app.post("/auth/reset-password", async (req, res) => {
+  const { email, kode, password_baru } = req.body;
+
+  if (!email || !kode || !password_baru) {
     return res
       .status(400)
-      .json({ error: "Email dan password baru wajib diisi" });
+      .json({ error: "Email, kode, dan password baru wajib diisi" });
   }
-  if (password_baru.length < 6) {
-    return res.status(400).json({ error: "Password minimal 6 karakter" });
+  if (password_baru.length < MIN_PASSWORD) {
+    return res
+      .status(400)
+      .json({ error: `Password minimal ${MIN_PASSWORD} karakter` });
   }
+
+  const emailBersih = String(email).trim().toLowerCase();
 
   try {
     const [rows] = await db.query(
       "select id, role from users where email = ?",
-      [email],
+      [emailBersih],
     );
-    if (rows.length === 0) {
-      return res.status(404).json({ error: "Email tidak ditemukan" });
+    if (rows.length === 0 || rows[0].role !== "manager") {
+      return res.status(400).json({ error: "Kode salah atau sudah tidak berlaku" });
     }
-    if (rows[0].role !== "manager") {
-      return res
-        .status(403)
-        .json({ error: "Reset password lewat web hanya untuk akun Manager" });
+
+    const hasil = await cekKodeOtp(emailBersih, "reset", String(kode).trim());
+    if (!hasil.ok) {
+      return res.status(400).json({ error: hasil.error });
     }
 
     const passwordHash = await bcrypt.hash(password_baru, 10);
-    await db.query("update users set password = ? where id = ?", [
-      passwordHash,
-      rows[0].id,
-    ]);
+    await db.query(
+      "update users set password = ?, email_terverifikasi = 1 where id = ?",
+      [passwordHash, rows[0].id],
+    );
+    await db.query(
+      "delete from kode_verifikasi where email = ? and tujuan = ?",
+      [emailBersih, "reset"],
+    );
 
     res.json({ message: "Password berhasil diubah" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    kirimError(res, err);
   }
 });
 
@@ -241,8 +561,10 @@ app.put("/auth/ganti-password", verifyToken, async (req, res) => {
       .status(400)
       .json({ error: "Password lama dan password baru wajib diisi" });
   }
-  if (password_baru.length < 6) {
-    return res.status(400).json({ error: "Password baru minimal 6 karakter" });
+  if (password_baru.length < MIN_PASSWORD) {
+    return res
+      .status(400)
+      .json({ error: `Password baru minimal ${MIN_PASSWORD} karakter` });
   }
 
   try {
