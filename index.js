@@ -7,7 +7,13 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const dns = require("dns").promises;
 const { google } = require("googleapis");
-const { verifyToken, verifyManager } = require("./middleware");
+const {
+  verifyToken,
+  verifyManager,
+  ambilGudang,
+  GUDANG_DEFAULT,
+  wajibGudang,
+} = require("./middleware");
 const { GoogleGenAI } = require("@google/genai");
 const multer = require("multer");
 const path = require("path");
@@ -59,14 +65,57 @@ const upload = multer({
 const JWT_SECRET = "rahasia_warehouse_ac03";
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Bikin SKU otomatis, lanjut dari nomor terakhir (SKU001, SKU002, dst)
-async function generateSkuBaru() {
+// Bikin SKU otomatis per gudang, lanjut dari nomor terakhir (SKU001, SKU002, dst)
+async function generateSkuBaru(gudangId) {
   const [rows] = await db.query(
-    "select sku from products where sku like 'SKU%' order by cast(substring(sku, 4) as unsigned) desc limit 1",
+    "select sku from products where gudang_id = ? and sku like 'SKU%' order by cast(substring(sku, 4) as unsigned) desc limit 1",
+    [gudangId],
   );
   if (rows.length === 0) return "SKU001";
   const angka = parseInt(rows[0].sku.replace("SKU", ""), 10) || 0;
   return "SKU" + String(angka + 1).padStart(3, "0");
+}
+
+// ==== GUDANG ====
+
+// Tanpa huruf/angka yang mirip (I, O, 0, 1) supaya kode mudah dibaca dan diketik
+const ALFABET_KODE = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function buatKodeGudang() {
+  let kode = "";
+  for (let i = 0; i < 6; i++) {
+    kode += ALFABET_KODE[crypto.randomInt(0, ALFABET_KODE.length)];
+  }
+  return kode;
+}
+
+async function buatGudangBaru(namaGudang) {
+  for (let percobaan = 0; percobaan < 10; percobaan++) {
+    try {
+      const [hasil] = await db.query("insert into gudang (kode) values (?)", [
+        buatKodeGudang(),
+      ]);
+      await db.query(
+        "insert into pengaturan_gudang (gudang_id, nama_gudang) values (?, ?)",
+        [hasil.insertId, namaGudang],
+      );
+      return hasil.insertId;
+    } catch (err) {
+      if (err.code !== "ER_DUP_ENTRY") throw err;
+    }
+  }
+  throw new Error("Gagal membuat kode gudang yang unik");
+}
+
+// Pastikan akun manager punya gudang; kalau belum, buatkan
+async function pastikanGudangManager(user) {
+  if (user.gudang_id) return user.gudang_id;
+  const gudangId = await buatGudangBaru(`Gudang ${user.nama}`);
+  await db.query("update users set gudang_id = ? where id = ?", [
+    gudangId,
+    user.id,
+  ]);
+  return gudangId;
 }
 
 // ==== EMAIL & OTP ====
@@ -336,6 +385,15 @@ app.post("/auth/verifikasi-email", async (req, res) => {
       [emailBersih, "verifikasi"],
     );
 
+    // Manager yang baru terverifikasi langsung dibuatkan gudang miliknya
+    const [akun] = await db.query(
+      "select id, nama, role, gudang_id from users where email = ?",
+      [emailBersih],
+    );
+    if (akun.length > 0 && akun[0].role === "manager") {
+      await pastikanGudangManager(akun[0]);
+    }
+
     res.json({ message: "Email berhasil diverifikasi, silakan login" });
   } catch (err) {
     kirimError(res, err);
@@ -370,7 +428,7 @@ app.post("/auth/kirim-ulang-kode", async (req, res) => {
 });
 
 app.post("/auth/register-staff", async (req, res) => {
-  const { nama, email, password, telepon } = req.body;
+  const { nama, email, password, telepon, kode_gudang } = req.body;
 
   if (!nama || !email || !password) {
     return res
@@ -383,21 +441,83 @@ app.post("/auth/register-staff", async (req, res) => {
       .json({ error: `Password minimal ${MIN_PASSWORD} karakter` });
   }
 
-  const [existing] = await db.query("select id from users where email = ?", [
-    email,
-  ]);
-  if (existing.length > 0) {
-    return res.status(400).json({ error: "Email sudah terdaftar" });
+  try {
+    // Tentukan gudang tujuan staf lewat kode gudang
+    let gudangId;
+    if (kode_gudang) {
+      const [gudang] = await db.query("select id from gudang where kode = ?", [
+        String(kode_gudang).trim().toUpperCase(),
+      ]);
+      if (gudang.length === 0) {
+        return res.status(400).json({ error: "Kode gudang tidak ditemukan" });
+      }
+      gudangId = gudang[0].id;
+    } else if (wajibGudang()) {
+      return res.status(400).json({ error: "Kode gudang wajib diisi" });
+    } else {
+      // masa transisi: klien lama belum mengirim kode, masuk ke gudang lama
+      gudangId = GUDANG_DEFAULT;
+    }
+
+    const [existing] = await db.query("select id from users where email = ?", [
+      email,
+    ]);
+    if (existing.length > 0) {
+      return res.status(400).json({ error: "Email sudah terdaftar" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await db.query(
+      "insert into users (nama, email, password, role, telepon, gudang_id) values (?, ?, ?, ?, ?, ?)",
+      [nama, email, passwordHash, "staff", telepon || null, gudangId],
+    );
+
+    res.status(201).json({ message: "Akun berhasil dibuat, silakan login" });
+  } catch (err) {
+    kirimError(res, err);
+  }
+});
+
+// Staf yang sudah dikeluarkan dari gudang bisa bergabung lagi dengan kode gudang
+app.post("/auth/gabung-gudang", async (req, res) => {
+  const { email, password, kode_gudang } = req.body;
+
+  if (!email || !password || !kode_gudang) {
+    return res
+      .status(400)
+      .json({ error: "Email, password, dan kode gudang wajib diisi" });
   }
 
-  const passwordHash = await bcrypt.hash(password, 10);
+  try {
+    const [rows] = await db.query(
+      "select id, password, role from users where email = ?",
+      [email],
+    );
+    if (rows.length === 0 || rows[0].role !== "staff") {
+      return res.status(401).json({ error: "Email atau password salah" });
+    }
 
-  await db.query(
-    "insert into users (nama, email, password, role, telepon) values (?, ?, ?, ?, ?)",
-    [nama, email, passwordHash, "staff", telepon || null],
-  );
+    const cocok = await bcrypt.compare(password, rows[0].password);
+    if (!cocok) {
+      return res.status(401).json({ error: "Email atau password salah" });
+    }
 
-  res.status(201).json({ message: "Akun berhasil dibuat, silakan login" });
+    const [gudang] = await db.query("select id from gudang where kode = ?", [
+      String(kode_gudang).trim().toUpperCase(),
+    ]);
+    if (gudang.length === 0) {
+      return res.status(400).json({ error: "Kode gudang tidak ditemukan" });
+    }
+
+    await db.query("update users set gudang_id = ? where id = ?", [
+      gudang[0].id,
+      rows[0].id,
+    ]);
+    res.json({ message: "Berhasil bergabung ke gudang, silakan login" });
+  } catch (err) {
+    kirimError(res, err);
+  }
 });
 
 app.post("/auth/login", async (req, res) => {
@@ -407,37 +527,52 @@ app.post("/auth/login", async (req, res) => {
     return res.status(400).json({ error: "Email dan password wajib diisi" });
   }
 
-  const [rows] = await db.query(
-    "select id, nama, email, password, role, email_terverifikasi from users where email = ?",
-    [email],
-  );
+  try {
+    const [rows] = await db.query(
+      "select id, nama, email, password, role, email_terverifikasi, gudang_id from users where email = ?",
+      [email],
+    );
 
-  if (rows.length === 0) {
-    return res.status(401).json({ error: "Email tidak ditemukan" });
+    if (rows.length === 0) {
+      return res.status(401).json({ error: "Email tidak ditemukan" });
+    }
+
+    const user = rows[0];
+    const cocok = await bcrypt.compare(password, user.password);
+
+    if (!cocok) {
+      return res.status(401).json({ error: "Password salah" });
+    }
+
+    if (Number(user.email_terverifikasi) !== 1) {
+      return res.status(403).json({
+        error: "Email belum diverifikasi",
+        perlu_verifikasi: true,
+        email: user.email,
+      });
+    }
+
+    let gudangId = user.gudang_id;
+    if (user.role === "manager") {
+      gudangId = await pastikanGudangManager(user);
+    } else if (!gudangId) {
+      return res.status(403).json({
+        error: "Akun kamu belum terhubung ke gudang. Gabung dulu dengan kode gudang.",
+        perlu_kode_gudang: true,
+        email: user.email,
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, nama: user.nama, role: user.role, gudang_id: gudangId },
+      JWT_SECRET,
+      { expiresIn: "7d" },
+    );
+
+    res.json({ token, nama: user.nama, role: user.role, gudang_id: gudangId });
+  } catch (err) {
+    kirimError(res, err);
   }
-
-  const user = rows[0];
-  const cocok = await bcrypt.compare(password, user.password);
-
-  if (!cocok) {
-    return res.status(401).json({ error: "Password salah" });
-  }
-
-  if (Number(user.email_terverifikasi) !== 1) {
-    return res.status(403).json({
-      error: "Email belum diverifikasi",
-      perlu_verifikasi: true,
-      email: user.email,
-    });
-  }
-
-  const token = jwt.sign(
-    { id: user.id, nama: user.nama, role: user.role },
-    JWT_SECRET,
-    { expiresIn: "7d" },
-  );
-
-  res.json({ token, nama: user.nama, role: user.role });
 });
 
 // Lupa password langkah 1: kirim kode OTP ke email (khusus akun manager)
@@ -591,12 +726,90 @@ app.put("/auth/ganti-password", verifyToken, async (req, res) => {
   }
 });
 
-// ==== PENGATURAN GUDANG ====
+// ==== GUDANG (kode gudang & anggota) ====
 
-app.get("/pengaturan", async (req, res) => {
+// Info gudang milik user yang login (kode hanya terlihat oleh manager)
+app.get("/gudang/saya", verifyToken, async (req, res) => {
+  try {
+    const [gudang] = await db.query("select id, kode from gudang where id = ?", [
+      req.gudangId,
+    ]);
+    if (gudang.length === 0) {
+      return res.status(404).json({ error: "Gudang tidak ditemukan" });
+    }
+
+    const [pengaturan] = await db.query(
+      "select nama_gudang from pengaturan_gudang where gudang_id = ?",
+      [req.gudangId],
+    );
+
+    res.json({
+      id: gudang[0].id,
+      nama_gudang: pengaturan.length > 0 ? pengaturan[0].nama_gudang : null,
+      kode: req.user.role === "manager" ? gudang[0].kode : undefined,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Buat kode gudang baru (kode lama langsung tidak berlaku)
+app.post("/gudang/kode-baru", verifyManager, async (req, res) => {
+  try {
+    for (let percobaan = 0; percobaan < 10; percobaan++) {
+      const kode = buatKodeGudang();
+      try {
+        await db.query("update gudang set kode = ? where id = ?", [
+          kode,
+          req.gudangId,
+        ]);
+        return res.json({ message: "Kode gudang diperbarui", kode });
+      } catch (err) {
+        if (err.code !== "ER_DUP_ENTRY") throw err;
+      }
+    }
+    res.status(500).json({ error: "Gagal membuat kode baru, coba lagi" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Daftar staf yang tergabung di gudang ini
+app.get("/gudang/staf", verifyManager, async (req, res) => {
   try {
     const [rows] = await db.query(
-      "select nama_gudang, telepon, alamat, provinsi, kota, kecamatan, kode_pos, catatan, latitude, longitude from pengaturan_gudang where id = 1",
+      "select id, nama, email, telepon from users where gudang_id = ? and role = 'staff' order by nama",
+      [req.gudangId],
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Keluarkan staf dari gudang (akunnya tetap ada, riwayat transaksinya tidak hilang)
+app.put("/gudang/staf/:id/keluarkan", verifyManager, async (req, res) => {
+  try {
+    const [hasil] = await db.query(
+      "update users set gudang_id = null where id = ? and gudang_id = ? and role = 'staff'",
+      [req.params.id, req.gudangId],
+    );
+    if (hasil.affectedRows === 0) {
+      return res.status(404).json({ error: "Staf tidak ditemukan di gudang ini" });
+    }
+    res.json({ message: "Staf dikeluarkan dari gudang" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==== PENGATURAN GUDANG ====
+
+app.get("/pengaturan", ambilGudang, async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      "select nama_gudang, telepon, alamat, provinsi, kota, kecamatan, kode_pos, catatan, latitude, longitude from pengaturan_gudang where gudang_id = ?",
+      [req.gudangId],
     );
     res.json(rows[0] || {});
   } catch (err) {
@@ -620,7 +833,7 @@ app.put("/pengaturan", verifyManager, async (req, res) => {
 
   try {
     await db.query(
-      "update pengaturan_gudang set nama_gudang = ?, telepon = ?, alamat = ?, provinsi = ?, kota = ?, kecamatan = ?, kode_pos = ?, catatan = ?, latitude = ?, longitude = ? where id = 1",
+      "update pengaturan_gudang set nama_gudang = ?, telepon = ?, alamat = ?, provinsi = ?, kota = ?, kecamatan = ?, kode_pos = ?, catatan = ?, latitude = ?, longitude = ? where gudang_id = ?",
       [
         nama_gudang || null,
         telepon || null,
@@ -632,6 +845,7 @@ app.put("/pengaturan", verifyManager, async (req, res) => {
         catatan || null,
         latitude || null,
         longitude || null,
+        req.gudangId,
       ],
     );
     res.json({ message: "Pengaturan gudang berhasil disimpan" });
@@ -672,10 +886,11 @@ app.post("/keluhan", verifyToken, async (req, res) => {
 
 // ==== PRODUCTS (CRUD) ====
 
-app.get("/products", async (req, res) => {
+app.get("/products", ambilGudang, async (req, res) => {
   try {
     const [rows] = await db.query(
-      "select id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum from products",
+      "select id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum from products where gudang_id = ?",
+      [req.gudangId],
     );
     res.json(rows);
   } catch (err) {
@@ -688,10 +903,11 @@ app.post("/products", verifyManager, async (req, res) => {
     req.body;
 
   try {
-    const skuBaru = await generateSkuBaru();
+    const skuBaru = await generateSkuBaru(req.gudangId);
     await db.query(
-      "insert into products (sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum) values (?, ?, ?, ?, ?, ?, ?, ?)",
+      "insert into products (gudang_id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
+        req.gudangId,
         skuBaru,
         nama,
         kategori,
@@ -714,8 +930,8 @@ app.put("/products/:id", verifyManager, async (req, res) => {
   const { nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum } =
     req.body;
 
-  await db.query(
-    "update products set nama = ?, kategori = ?, satuan = ?, harga = ?, gambar = ?, stok_saat_ini = ?, stok_minimum = ? where id = ?",
+  const [hasil] = await db.query(
+    "update products set nama = ?, kategori = ?, satuan = ?, harga = ?, gambar = ?, stok_saat_ini = ?, stok_minimum = ? where id = ? and gudang_id = ?",
     [
       nama,
       kategori,
@@ -725,13 +941,25 @@ app.put("/products/:id", verifyManager, async (req, res) => {
       stok_saat_ini,
       stok_minimum,
       req.params.id,
+      req.gudangId,
     ],
   );
+
+  if (hasil.affectedRows === 0) {
+    return res.status(404).json({ error: "Produk tidak ditemukan" });
+  }
   res.json({ message: "Produk berhasil diupdate" });
 });
 
 app.delete("/products/:id", verifyManager, async (req, res) => {
-  await db.query("delete from products where id = ?", [req.params.id]);
+  const [hasil] = await db.query(
+    "delete from products where id = ? and gudang_id = ?",
+    [req.params.id, req.gudangId],
+  );
+
+  if (hasil.affectedRows === 0) {
+    return res.status(404).json({ error: "Produk tidak ditemukan" });
+  }
   res.json({ message: "Produk berhasil dihapus" });
 });
 
@@ -741,8 +969,8 @@ app.post("/transactions", verifyToken, async (req, res) => {
   const { sku, tipe, jumlah, catatan } = req.body;
 
   const [produk] = await db.query(
-    "select id, stok_saat_ini from products where sku = ?",
-    [sku],
+    "select id, stok_saat_ini from products where sku = ? and gudang_id = ?",
+    [sku, req.gudangId],
   );
 
   if (produk.length === 0) {
@@ -775,9 +1003,10 @@ app.post("/transactions", verifyToken, async (req, res) => {
     .json({ message: "Transaksi berhasil dicatat", stok_baru: stokBaru });
 });
 
-app.get("/transactions/recent", async (req, res) => {
+app.get("/transactions/recent", ambilGudang, async (req, res) => {
   const [rows] = await db.query(
-    "select stock_transactions.id, products.nama, products.sku, products.gambar, stock_transactions.tipe, stock_transactions.jumlah, stock_transactions.catatan, stock_transactions.created_at, users.nama as nama_staf from stock_transactions, products, users where stock_transactions.product_id = products.id and stock_transactions.user_id = users.id order by stock_transactions.created_at desc limit 50",
+    "select stock_transactions.id, products.nama, products.sku, products.gambar, stock_transactions.tipe, stock_transactions.jumlah, stock_transactions.catatan, stock_transactions.created_at, users.nama as nama_staf from stock_transactions, products, users where stock_transactions.product_id = products.id and stock_transactions.user_id = users.id and products.gudang_id = ? order by stock_transactions.created_at desc limit 50",
+    [req.gudangId],
   );
   res.json(rows);
 });
@@ -839,8 +1068,15 @@ async function generateContentDenganRetry(prompt) {
 app.post("/ai-insights/generate", verifyManager, async (req, res) => {
   try {
     const [produk] = await db.query(
-      "select id, sku, nama, stok_saat_ini, stok_minimum from products",
+      "select id, sku, nama, stok_saat_ini, stok_minimum from products where gudang_id = ?",
+      [req.gudangId],
     );
+
+    if (produk.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "Belum ada produk di gudang ini untuk dianalisis" });
+    }
 
     const dataAnalisis = [];
     for (const p of produk) {
@@ -895,7 +1131,8 @@ Untuk setiap produk, perkirakan berapa hari lagi stoknya akan habis (berdasarkan
 
 app.get("/ai-insights", verifyManager, async (req, res) => {
   const [rows] = await db.query(
-    "select ai_insights.id, products.nama, products.sku, products.gambar, products.stok_saat_ini, products.stok_minimum, ai_insights.rekomendasi, ai_insights.jumlah_restock_disarankan, ai_insights.generated_at, case when ai_insights.generated_at = (select max(b.generated_at) from ai_insights b where b.product_id = ai_insights.product_id) then 1 else 0 end as is_terbaru from ai_insights, products where ai_insights.product_id = products.id order by ai_insights.generated_at desc limit 50",
+    "select ai_insights.id, products.nama, products.sku, products.gambar, products.stok_saat_ini, products.stok_minimum, ai_insights.rekomendasi, ai_insights.jumlah_restock_disarankan, ai_insights.generated_at, case when ai_insights.generated_at = (select max(b.generated_at) from ai_insights b where b.product_id = ai_insights.product_id) then 1 else 0 end as is_terbaru from ai_insights, products where ai_insights.product_id = products.id and products.gudang_id = ? order by ai_insights.generated_at desc limit 50",
+    [req.gudangId],
   );
   res.json(rows);
 });
@@ -905,9 +1142,10 @@ app.get("/ai-insights", verifyManager, async (req, res) => {
 app.post("/purchase-orders", verifyManager, async (req, res) => {
   const { sku, jumlah, catatan } = req.body;
 
-  const [produk] = await db.query("select id from products where sku = ?", [
-    sku,
-  ]);
+  const [produk] = await db.query(
+    "select id from products where sku = ? and gudang_id = ?",
+    [sku, req.gudangId],
+  );
 
   if (produk.length === 0) {
     return res.status(404).json({ error: "SKU tidak ditemukan" });
@@ -923,15 +1161,16 @@ app.post("/purchase-orders", verifyManager, async (req, res) => {
 
 app.get("/purchase-orders", verifyManager, async (req, res) => {
   const [rows] = await db.query(
-    "select purchase_orders.id, products.nama, products.sku, products.harga, products.gambar, purchase_orders.jumlah, purchase_orders.status, purchase_orders.catatan, purchase_orders.created_at from purchase_orders, products where purchase_orders.product_id = products.id order by purchase_orders.created_at desc",
+    "select purchase_orders.id, products.nama, products.sku, products.harga, products.gambar, purchase_orders.jumlah, purchase_orders.status, purchase_orders.catatan, purchase_orders.created_at from purchase_orders, products where purchase_orders.product_id = products.id and products.gudang_id = ? order by purchase_orders.created_at desc",
+    [req.gudangId],
   );
   res.json(rows);
 });
 
 app.put("/purchase-orders/:id/selesai", verifyManager, async (req, res) => {
   const [po] = await db.query(
-    "select id, product_id, jumlah, status from purchase_orders where id = ?",
-    [req.params.id],
+    "select purchase_orders.id as id, product_id, jumlah, status from purchase_orders, products where purchase_orders.product_id = products.id and purchase_orders.id = ? and products.gudang_id = ?",
+    [req.params.id, req.gudangId],
   );
 
   if (po.length === 0) {
