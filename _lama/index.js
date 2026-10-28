@@ -435,10 +435,21 @@ app.post("/auth/register-staff", async (req, res) => {
       .status(400)
       .json({ error: "Nama, email, dan password wajib diisi" });
   }
+
+  const emailBersih = String(email).trim().toLowerCase();
+
+  if (!POLA_EMAIL.test(emailBersih)) {
+    return res.status(400).json({ error: "Format email tidak valid" });
+  }
   if (password.length < MIN_PASSWORD) {
     return res
       .status(400)
       .json({ error: `Password minimal ${MIN_PASSWORD} karakter` });
+  }
+  if (!(await domainEmailValid(emailBersih))) {
+    return res.status(400).json({
+      error: "Domain email tidak ditemukan. Gunakan email aktif, contoh: nama@gmail.com",
+    });
   }
 
   try {
@@ -459,21 +470,39 @@ app.post("/auth/register-staff", async (req, res) => {
       gudangId = GUDANG_DEFAULT;
     }
 
-    const [existing] = await db.query("select id from users where email = ?", [
-      email,
-    ]);
-    if (existing.length > 0) {
-      return res.status(400).json({ error: "Email sudah terdaftar" });
-    }
+    const [existing] = await db.query(
+      "select id, role, email_terverifikasi from users where email = ?",
+      [emailBersih],
+    );
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    await db.query(
-      "insert into users (nama, email, password, role, telepon, gudang_id) values (?, ?, ?, ?, ?, ?)",
-      [nama, email, passwordHash, "staff", telepon || null, gudangId],
-    );
+    if (existing.length > 0) {
+      if (
+        Number(existing[0].email_terverifikasi) === 1 ||
+        existing[0].role !== "staff"
+      ) {
+        return res.status(400).json({ error: "Email sudah terdaftar" });
+      }
+      // staf yang belum sempat verifikasi: perbarui data, kirim kode baru
+      await db.query(
+        "update users set nama = ?, password = ?, telepon = ?, gudang_id = ? where id = ?",
+        [nama, passwordHash, telepon || null, gudangId, existing[0].id],
+      );
+    } else {
+      await db.query(
+        "insert into users (nama, email, password, role, telepon, gudang_id, email_terverifikasi) values (?, ?, ?, ?, ?, ?, 0)",
+        [nama, emailBersih, passwordHash, "staff", telepon || null, gudangId],
+      );
+    }
 
-    res.status(201).json({ message: "Akun berhasil dibuat, silakan login" });
+    await kirimKodeOtp(emailBersih, "verifikasi", nama);
+
+    res.status(201).json({
+      message: "Akun dibuat. Kode verifikasi sudah dikirim ke email kamu.",
+      perlu_verifikasi: true,
+      email: emailBersih,
+    });
   } catch (err) {
     kirimError(res, err);
   }
@@ -576,6 +605,7 @@ app.post("/auth/login", async (req, res) => {
 });
 
 // Lupa password langkah 1: kirim kode OTP ke email (khusus akun manager)
+// Lupa password langkah 1: kirim kode OTP ke email (manager dan staf)
 app.post("/auth/lupa-password", async (req, res) => {
   const { email } = req.body;
 
@@ -591,14 +621,60 @@ app.post("/auth/lupa-password", async (req, res) => {
       [emailBersih],
     );
 
-    if (rows.length > 0 && rows[0].role === "manager") {
+    if (rows.length > 0) {
       await kirimKodeOtp(emailBersih, "reset", rows[0].nama);
     }
 
     // jawaban sama untuk email terdaftar maupun tidak
     res.json({
-      message: "Jika email terdaftar sebagai Manager, kode reset sudah dikirim",
+      message: "Jika email terdaftar, kode reset sudah dikirim",
     });
+  } catch (err) {
+    kirimError(res, err);
+  }
+});
+
+// Lupa password langkah 2: cek kode OTP, lalu ganti password
+app.post("/auth/reset-password", async (req, res) => {
+  const { email, kode, password_baru } = req.body;
+
+  if (!email || !kode || !password_baru) {
+    return res
+      .status(400)
+      .json({ error: "Email, kode, dan password baru wajib diisi" });
+  }
+  if (password_baru.length < MIN_PASSWORD) {
+    return res
+      .status(400)
+      .json({ error: `Password minimal ${MIN_PASSWORD} karakter` });
+  }
+
+  const emailBersih = String(email).trim().toLowerCase();
+
+  try {
+    const [rows] = await db.query("select id from users where email = ?", [
+      emailBersih,
+    ]);
+    if (rows.length === 0) {
+      return res.status(400).json({ error: "Kode salah atau sudah tidak berlaku" });
+    }
+
+    const hasil = await cekKodeOtp(emailBersih, "reset", String(kode).trim());
+    if (!hasil.ok) {
+      return res.status(400).json({ error: hasil.error });
+    }
+
+    const passwordHash = await bcrypt.hash(password_baru, 10);
+    await db.query(
+      "update users set password = ?, email_terverifikasi = 1 where id = ?",
+      [passwordHash, rows[0].id],
+    );
+    await db.query(
+      "delete from kode_verifikasi where email = ? and tujuan = ?",
+      [emailBersih, "reset"],
+    );
+
+    res.json({ message: "Password berhasil diubah" });
   } catch (err) {
     kirimError(res, err);
   }
@@ -889,7 +965,7 @@ app.post("/keluhan", verifyToken, async (req, res) => {
 app.get("/products", ambilGudang, async (req, res) => {
   try {
     const [rows] = await db.query(
-      "select id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_minimum from products where gudang_id = ?",
+      "select id, sku, nama, kategori, satuan, harga, gambar, stok_saat_ini, stok_rusak, stok_minimum from products where gudang_id = ?",
       [req.gudangId],
     );
     res.json(rows);
@@ -966,41 +1042,75 @@ app.delete("/products/:id", verifyManager, async (req, res) => {
 // ==== TRANSACTIONS ====
 
 app.post("/transactions", verifyToken, async (req, res) => {
-  const { sku, tipe, jumlah, catatan } = req.body;
+  const { sku, tipe, catatan } = req.body;
+  const jumlah = Number(req.body.jumlah);
 
-  const [produk] = await db.query(
-    "select id, stok_saat_ini from products where sku = ? and gudang_id = ?",
-    [sku, req.gudangId],
-  );
-
-  if (produk.length === 0) {
-    return res.status(404).json({ error: "SKU tidak ditemukan" });
+  const tipeValid = ["in", "out", "rusak", "buang_rusak", "pulih_rusak"];
+  if (!tipeValid.includes(tipe)) {
+    return res.status(400).json({ error: "Tipe transaksi tidak valid" });
+  }
+  if (!Number.isInteger(jumlah) || jumlah <= 0) {
+    return res.status(400).json({ error: "Jumlah harus angka bulat lebih dari 0" });
   }
 
-  const product = produk[0];
+  try {
+    const [produk] = await db.query(
+      "select id, stok_saat_ini, stok_rusak from products where sku = ? and gudang_id = ?",
+      [sku, req.gudangId],
+    );
 
-  if (tipe === "out" && product.stok_saat_ini < jumlah) {
-    return res.status(400).json({ error: "Stok tidak mencukupi" });
+    if (produk.length === 0) {
+      return res.status(404).json({ error: "SKU tidak ditemukan" });
+    }
+
+    const product = produk[0];
+    let stokBaru = product.stok_saat_ini;
+    let stokRusakBaru = product.stok_rusak;
+
+    if (tipe === "in") {
+      stokBaru = stokBaru + jumlah;
+    } else if (tipe === "out") {
+      if (stokBaru < jumlah) {
+        return res.status(400).json({ error: "Stok tidak mencukupi" });
+      }
+      stokBaru = stokBaru - jumlah;
+    } else if (tipe === "rusak") {
+      if (stokBaru < jumlah) {
+        return res.status(400).json({ error: "Stok layak tidak mencukupi" });
+      }
+      stokBaru = stokBaru - jumlah;
+      stokRusakBaru = stokRusakBaru + jumlah;
+    } else if (tipe === "buang_rusak") {
+      if (stokRusakBaru < jumlah) {
+        return res.status(400).json({ error: "Stok rusak tidak mencukupi" });
+      }
+      stokRusakBaru = stokRusakBaru - jumlah;
+    } else if (tipe === "pulih_rusak") {
+      if (stokRusakBaru < jumlah) {
+        return res.status(400).json({ error: "Stok rusak tidak mencukupi" });
+      }
+      stokRusakBaru = stokRusakBaru - jumlah;
+      stokBaru = stokBaru + jumlah;
+    }
+
+    await db.query(
+      "insert into stock_transactions (product_id, user_id, tipe, jumlah, catatan) values (?, ?, ?, ?, ?)",
+      [product.id, req.user.id, tipe, jumlah, catatan || null],
+    );
+
+    await db.query(
+      "update products set stok_saat_ini = ?, stok_rusak = ? where id = ?",
+      [stokBaru, stokRusakBaru, product.id],
+    );
+
+    res.status(201).json({
+      message: "Transaksi berhasil dicatat",
+      stok_baru: stokBaru,
+      stok_rusak_baru: stokRusakBaru,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const stokBaru =
-    tipe === "in"
-      ? product.stok_saat_ini + jumlah
-      : product.stok_saat_ini - jumlah;
-
-  await db.query(
-    "insert into stock_transactions (product_id, user_id, tipe, jumlah, catatan) values (?, ?, ?, ?, ?)",
-    [product.id, req.user.id, tipe, jumlah, catatan || null],
-  );
-
-  await db.query("update products set stok_saat_ini = ? where id = ?", [
-    stokBaru,
-    product.id,
-  ]);
-
-  res
-    .status(201)
-    .json({ message: "Transaksi berhasil dicatat", stok_baru: stokBaru });
 });
 
 app.get("/transactions/recent", ambilGudang, async (req, res) => {
