@@ -3,6 +3,7 @@ import { promises as dns } from "dns";
 import bcrypt from "bcrypt";
 import { db } from "../config/db";
 import { kirimEmail } from "./email";
+import { emailTidakTerkirim } from "./bounce";
 import { HttpError } from "../utils/error";
 
 export const MIN_PASSWORD = 8;
@@ -51,8 +52,14 @@ function templateEmailKode(nama: string, kode: string, tujuan: string): string {
 </div>`;
 }
 
-// Buat kode baru, simpan hash-nya, lalu kirim ke email
-export async function kirimKodeOtp(email: string, tujuan: string, nama: string) {
+// Buat kode baru, simpan hash-nya, lalu kirim ke email.
+// cekAlamat: setelah terkirim, pastikan alamat tidak ditolak (dipakai saat daftar).
+export async function kirimKodeOtp(
+  email: string,
+  tujuan: string,
+  nama: string,
+  opsi: { cekAlamat?: boolean } = {},
+) {
   const [terakhir] = await db.query<any[]>(
     "select timestampdiff(second, created_at, now()) as detik from kode_verifikasi where email = ? and tujuan = ? order by id desc limit 1",
     [email, tujuan],
@@ -79,6 +86,8 @@ export async function kirimKodeOtp(email: string, tujuan: string, nama: string) 
       ? "Kode verifikasi email Stockin"
       : "Kode reset password Stockin";
 
+  const mulai = Date.now();
+
   try {
     await kirimEmail(email, judul, templateEmailKode(nama, kode, tujuan));
   } catch (err: any) {
@@ -88,6 +97,37 @@ export async function kirimKodeOtp(email: string, tujuan: string, nama: string) 
       tujuan,
     ]);
     throw new HttpError(502, "Gagal mengirim email. Coba lagi beberapa saat.");
+  }
+
+  if (opsi.cekAlamat) {
+    const ditolak = await emailTidakTerkirim(email, mulai);
+    if (ditolak === true) {
+      await db.query("delete from kode_verifikasi where email = ? and tujuan = ?", [
+        email,
+        tujuan,
+      ]);
+      throw new HttpError(
+        400,
+        "Email tidak tersedia atau tidak ditemukan. Periksa kembali alamat email kamu.",
+        "email_tidak_ada",
+      );
+    }
+  }
+}
+
+// Dipakai saat daftar (manager dan staf): kirim kode lalu pastikan alamat benar-benar ada.
+// Kalau alamat ditolak, akun yang belum terverifikasi dihapus supaya tidak jadi sampah.
+export async function kirimKodeVerifikasiBaru(email: string, nama: string) {
+  try {
+    await kirimKodeOtp(email, "verifikasi", nama, { cekAlamat: true });
+  } catch (err: any) {
+    if (err.kode === "email_tidak_ada") {
+      await db.query(
+        "delete from users where email = ? and email_terverifikasi = 0",
+        [email],
+      );
+    }
+    throw err;
   }
 }
 

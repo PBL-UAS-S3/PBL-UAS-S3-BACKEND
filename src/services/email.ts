@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 
-// Kirim email lewat Gmail API (HTTPS), bukan SMTP
-export async function kirimEmail(tujuan: string, subjek: string, html: string) {
+// Klien Gmail API (HTTPS), dipakai untuk kirim email dan mengecek email yang ditolak
+export function buatKlienGmail() {
   if (
     !process.env.GOOGLE_CLIENT_ID ||
     !process.env.GOOGLE_CLIENT_SECRET ||
@@ -17,7 +17,12 @@ export async function kirimEmail(tujuan: string, subjek: string, html: string) {
     "https://developers.google.com/oauthplayground",
   );
   oauth2.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-  const gmail = google.gmail({ version: "v1", auth: oauth2 });
+  return google.gmail({ version: "v1", auth: oauth2 });
+}
+
+// Kirim email lewat Gmail API (HTTPS), bukan SMTP
+export async function kirimEmail(tujuan: string, subjek: string, html: string) {
+  const gmail = buatKlienGmail();
 
   const pesan = [
     `From: Stockin <${process.env.EMAIL_PENGIRIM}>`,

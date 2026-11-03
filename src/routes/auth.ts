@@ -9,7 +9,8 @@ import {
   MIN_PASSWORD,
   POLA_EMAIL,
   domainEmailValid,
-  kirimKodeOtp,
+  kirimKodeOtp,   
+  kirimKodeVerifikasiBaru,
   cekKodeOtp,
 } from "../services/otp";
 import { pastikanGudangManager } from "../services/gudang";
@@ -62,7 +63,7 @@ router.post("/register", async (req, res) => {
       );
     }
 
-    await kirimKodeOtp(emailBersih, "verifikasi", nama);
+    await kirimKodeVerifikasiBaru(emailBersih, nama);
 
     res.status(201).json({
       message: "Akun dibuat. Kode verifikasi sudah dikirim ke email kamu.",
@@ -187,7 +188,7 @@ router.post("/register-staff", async (req, res) => {
       );
     }
 
-    await kirimKodeOtp(emailBersih, "verifikasi", nama);
+    await kirimKodeVerifikasiBaru(emailBersih, nama);
 
     res.status(201).json({
       message: "Akun dibuat. Kode verifikasi sudah dikirim ke email kamu.",
