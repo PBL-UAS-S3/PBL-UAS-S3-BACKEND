@@ -13,7 +13,7 @@ import purchaseOrdersRouter from "./routes/purchaseOrders";
 import uploadRouter, { uploadDir } from "./routes/upload";
 
 const app = express();
-
+app.set("trust proxy", 1);
 // Bersihkan akun yang tidak pernah diverifikasi (misalnya email palsu), tiap 30 menit
 async function bersihkanAkunBelumVerifikasi() {
   try {
