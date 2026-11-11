@@ -10,7 +10,8 @@ import productsRouter from "./routes/products";
 import transactionsRouter from "./routes/transactions";
 import aiInsightsRouter from "./routes/aiInsights";
 import purchaseOrdersRouter from "./routes/purchaseOrders";
-import uploadRouter, { uploadDir } from "./routes/upload";
+import uploadRouter from "./routes/upload";
+import { uploadDir } from "./config/upload";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -61,7 +62,5 @@ app.use("/transactions", transactionsRouter);
 app.use("/ai-insights", aiInsightsRouter);
 app.use("/purchase-orders", purchaseOrdersRouter);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server jalan di port ${PORT}`);
-});
+const PORT = Number(process.env.PORT) || 3000;
+app.listen(PORT, "0.0.0.0", () => console.log(`Server jalan di ${PORT}`));

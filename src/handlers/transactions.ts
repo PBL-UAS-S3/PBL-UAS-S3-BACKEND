@@ -3,7 +3,7 @@ import { HttpError, kirimError } from "../utils/error";
 import { bacaTransaksiDto, type TipeTransaksi } from "../dto/transactions";
 import * as transaksiRepo from "../repositories/transactions";
 
-const BATAS_RIWAYAT = 50;
+const BATAS_RIWAYAT = 1000;
 
 // Aturan perubahan stok layak dan stok rusak untuk tiap tipe transaksi
 function hitungStok(tipe: TipeTransaksi, jumlah: number, stok: number, rusak: number) {
